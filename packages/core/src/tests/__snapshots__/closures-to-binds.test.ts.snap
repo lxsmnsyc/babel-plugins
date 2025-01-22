@@ -1,0 +1,12 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`closures-to-binds > FunctionExpression > should compile 1`] = `
+"function fn_1() {
+  return console.log(this.arr);
+}
+function foo(arr) {
+  const example = fn_1.bind({
+    arr
+  });
+}"
+`;
