@@ -6,8 +6,12 @@ describe('closures-to-binds', () => {
   describe('FunctionExpression', () => {
     it('should compile', async () => {
       const example = `
-      function foo(arr) {
-        const example = () => console.log(arr);
+      function test() {
+        let example = 0;
+
+        const foo = () => () => () => example;
+
+        example++;
       }
       `;
 

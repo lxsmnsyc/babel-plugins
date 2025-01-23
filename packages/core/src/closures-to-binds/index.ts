@@ -5,45 +5,6 @@ import { generateUniqueName } from '../shared/generate-unique-name';
 import getForeignBindings from '../shared/get-foreign-bindings';
 import { isStatementTopLevel } from '../shared/is-statement-top-level';
 
-const FUNCTION_BUBBLE: Visitor = {
-  FunctionDeclaration(path) {
-    if (isStatementTopLevel(path)) {
-      return;
-    }
-    const decl = path.node;
-    if (!decl.id) {
-      return;
-    }
-    // Move this to the top
-    const block = path.scope.getBlockParent();
-
-    if (!block.path.isBlockStatement()) {
-      return;
-    }
-
-    const [tmp] = block.path.unshiftContainer(
-      'body',
-      t.variableDeclaration('const', [
-        t.variableDeclarator(
-          decl.id,
-          t.functionExpression(
-            decl.id,
-            decl.params,
-            decl.body,
-            decl.generator,
-            decl.async,
-          ),
-        ),
-      ]),
-    );
-    block.registerDeclaration(tmp);
-  },
-};
-
-function hasConstantViolations(
-  path: NodePath<t.ArrowFunctionExpression | t.FunctionExpression>,
-): boolean {}
-
 function transformPureFunction(
   program: NodePath<t.Program>,
   path: NodePath<t.ArrowFunctionExpression | t.FunctionExpression>,
@@ -85,6 +46,7 @@ function transformImpureFunction(
   path: NodePath<t.ArrowFunctionExpression | t.FunctionExpression>,
   locals: Binding[],
 ): void {
+  // Replace all local references with the closure object access
   path.traverse({
     ReferencedIdentifier(child) {
       const binding = child.scope.getBinding(child.node.name);
@@ -118,20 +80,42 @@ function transformImpureFunction(
   );
 }
 
+// A <- B <- C <- this
+
 function hasThisReference(
   path: NodePath<t.ArrowFunctionExpression | t.FunctionExpression>,
 ): boolean {
   let result = false;
   path.traverse({
     ThisExpression(child) {
-      const functionParent = child.getFunctionParent();
-      if (functionParent === path) {
-        result = true;
-        child.stop();
+      let current: NodePath | null = child.parentPath;
+      while (current) {
+        if (current === path) {
+          result = true;
+          child.stop();
+          break;
+        }
+        if (current.isFunctionExpression() || current.isFunctionDeclaration()) {
+          break;
+        }
+        current = current.parentPath;
       }
     },
   });
   return result;
+}
+
+function isValidLocalBinding(binding: Binding): boolean {
+  if (binding.kind === 'module') {
+    return false;
+  }
+  let blockParent = binding.path.scope.getBlockParent();
+  const programParent = binding.path.scope.getProgramParent();
+  // a FunctionDeclaration binding refers to itself as the block parent
+  if (blockParent.path === binding.path) {
+    blockParent = blockParent.parent;
+  }
+  return blockParent !== programParent;
 }
 
 function transformFunction(
@@ -139,9 +123,13 @@ function transformFunction(
   path: NodePath<t.ArrowFunctionExpression | t.FunctionExpression>,
 ): void {
   const parent = path.getStatementParent();
-  if (!parent || isStatementTopLevel(parent)) {
+  if (
+    !parent ||
+    (isStatementTopLevel(parent) && !parent.isClassDeclaration())
+  ) {
     return;
   }
+  // There's a this reference, skip
   if (hasThisReference(path)) {
     return;
   }
@@ -152,13 +140,10 @@ function transformFunction(
   for (const binding of bindings) {
     const target = path.scope.getBinding(binding);
     if (target) {
-      // Check if this has mutations
       if (!target.constant) {
-        // Oh well, we give up (for now)
         return;
       }
-      // Check if it's not a module
-      if (target.kind !== 'module') {
+      if (isValidLocalBinding(target)) {
         locals.push(target);
       }
     }
@@ -183,10 +168,6 @@ const FUNCTION_TRANSFORM: Visitor<NodePath<t.Program>> = {
 const PLUGIN: PluginObj = {
   visitor: {
     Program(program) {
-      // First, bubble up all function declarations that are not top-level
-      // and convert them into function expressions
-      program.traverse(FUNCTION_BUBBLE);
-      // Then we transform
       program.traverse(FUNCTION_TRANSFORM, program);
     },
   },
